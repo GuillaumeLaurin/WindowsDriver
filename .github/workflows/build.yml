@@ -1,0 +1,265 @@
+name: Build & Sign Driver
+
+on:
+  push:
+    branches: [main]
+    tags:     ['v*']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Must match the project() name in CMakeLists.txt and the certificate
+  # subject created by `create_test_cert` / Export-SigningCert.ps1.
+  PROJECT_NAME: Template
+
+jobs:
+  build:
+    name: ${{ matrix.preset }}
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release, wdm-debug, wdm-release]
+        include:
+          - preset: debug
+            artifact_suffix: kmdf-dbg
+            sign: false
+          - preset: release
+            artifact_suffix: kmdf-rel
+            sign: true
+          - preset: wdm-debug
+            artifact_suffix: wdm-dbg
+            sign: false
+          - preset: wdm-release
+            artifact_suffix: wdm-rel
+            sign: true
+
+    steps:
+      # -------------------------------------------------------------------------
+      # 1. Checkout
+      # -------------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      # -------------------------------------------------------------------------
+      # 2. Cache the WDK installer (saves ~5 min per run)
+      # -------------------------------------------------------------------------
+      - name: Cache WDK installer
+        id: cache-wdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\wdksetup.exe
+          key: wdk-installer-26100-v1
+
+      - name: Download WDK installer
+        if: steps.cache-wdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://go.microsoft.com/fwlink/?linkid=2249371" `
+            -OutFile "$env:RUNNER_TEMP\wdksetup.exe" `
+            -UseBasicParsing
+          Write-Host "WDK installer downloaded."
+
+      - name: Install WDK
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "$env:RUNNER_TEMP\wdksetup.exe" `
+            -ArgumentList "/quiet", "/norestart" `
+            -Wait -NoNewWindow
+          Write-Host "WDK installed."
+
+      # -------------------------------------------------------------------------
+      # 3. Setup MSVC environment
+      # -------------------------------------------------------------------------
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # -------------------------------------------------------------------------
+      # 4. Import signing certificate
+      #    Only for release presets and only when the secret exists.
+      #    PRs from forks have no access to secrets — signing is skipped.
+      # -------------------------------------------------------------------------
+      - name: Import signing certificate
+        if: ${{ matrix.sign }}
+        shell: pwsh
+        env:
+          DRIVER_CERT_PFX_B64: ${{ secrets.DRIVER_CERT_PFX_B64 }}
+          CERT_PASSWORD:        ${{ secrets.CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:DRIVER_CERT_PFX_B64)) {
+              Write-Host "No certificate secret found — signing will be skipped."
+              exit 0
+          }
+
+          $pfxPath = Join-Path $env:TEMP "driver-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:DRIVER_CERT_PFX_B64))
+
+          $securePass = if ([string]::IsNullOrEmpty($env:CERT_PASSWORD)) {
+              New-Object System.Security.SecureString
+          } else {
+              ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          }
+
+          Import-PfxCertificate `
+            -FilePath $pfxPath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $securePass | Out-Null
+
+          Remove-Item $pfxPath -Force
+          Write-Host "Certificate imported: CN=$env:PROJECT_NAME"
+
+      # -------------------------------------------------------------------------
+      # 5a. Configure CMake — debug presets (never sign)
+      # -------------------------------------------------------------------------
+      - name: Configure (${{ matrix.preset }})
+        if: ${{ !matrix.sign }}
+        run: cmake --preset ${{ matrix.preset }} -DDRIVER_SIGN=OFF
+
+      # -------------------------------------------------------------------------
+      # 5b. Configure CMake — release presets (sign only if cert secret exists)
+      # -------------------------------------------------------------------------
+      - name: Configure (${{ matrix.preset }})
+        if: ${{ matrix.sign }}
+        shell: pwsh
+        env:
+          DRIVER_CERT_PFX_B64: ${{ secrets.DRIVER_CERT_PFX_B64 }}
+        run: |
+          $sign = if ([string]::IsNullOrEmpty($env:DRIVER_CERT_PFX_B64)) { "OFF" } else { "ON" }
+          Write-Host "DRIVER_SIGN=$sign"
+          cmake --preset ${{ matrix.preset }} -DDRIVER_SIGN=$sign
+
+      # -------------------------------------------------------------------------
+      # 6. Build
+      # -------------------------------------------------------------------------
+      - name: Build (${{ matrix.preset }})
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      # -------------------------------------------------------------------------
+      # 7. Export public certificate for distribution
+      # -------------------------------------------------------------------------
+      - name: Export public certificate
+        if: ${{ matrix.sign }}
+        shell: pwsh
+        env:
+          DRIVER_CERT_PFX_B64: ${{ secrets.DRIVER_CERT_PFX_B64 }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:DRIVER_CERT_PFX_B64)) {
+              Write-Host "No certificate secret found — skipping cert export."
+              exit 0
+          }
+
+          $cert = Get-ChildItem Cert:\CurrentUser\My |
+              Where-Object { $_.Subject -eq "CN=$env:PROJECT_NAME" } |
+              Select-Object -First 1
+
+          if (-not $cert) {
+              Write-Error "Certificate CN=$env:PROJECT_NAME not found."
+              exit 1
+          }
+
+          $outPath = "build/${{ matrix.preset }}/$env:PROJECT_NAME.cer"
+          Export-Certificate -Cert $cert -FilePath $outPath | Out-Null
+          Write-Host "Public certificate exported: $outPath"
+
+      # -------------------------------------------------------------------------
+      # 8. Verify outputs
+      # -------------------------------------------------------------------------
+      - name: Verify outputs
+        shell: pwsh
+        run: |
+          $sys = Get-ChildItem -Recurse "build/${{ matrix.preset }}" -Filter "*.sys"
+          if ($sys.Count -eq 0) {
+              Write-Error "No .sys file found — build failed."
+              exit 1
+          }
+          $sys | ForEach-Object { Write-Host "  OK $($_.FullName)" }
+
+      # -------------------------------------------------------------------------
+      # 9. Package outputs
+      # -------------------------------------------------------------------------
+      - name: Package (${{ matrix.preset }})
+        shell: pwsh
+        run: |
+          $stage = "staging-${{ matrix.artifact_suffix }}"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          $files = @("$env:PROJECT_NAME.sys", "$env:PROJECT_NAME.pdb",
+                     "$env:PROJECT_NAME.inf", "$env:PROJECT_NAME.cer")
+
+          foreach ($f in $files) {
+              $item = Get-ChildItem -Recurse "build/${{ matrix.preset }}" -Filter $f -ErrorAction SilentlyContinue |
+                      Select-Object -First 1
+              if ($item) {
+                  Copy-Item $item.FullName "$stage\"
+                  Write-Host "  + $($item.Name)"
+              }
+          }
+
+          Compress-Archive -Path "$stage\*" -DestinationPath "$env:PROJECT_NAME-${{ matrix.artifact_suffix }}.zip"
+          Write-Host "Package: $env:PROJECT_NAME-${{ matrix.artifact_suffix }}.zip"
+
+      # -------------------------------------------------------------------------
+      # 10. Upload artifact
+      # -------------------------------------------------------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-${{ matrix.artifact_suffix }}
+          path: ${{ env.PROJECT_NAME }}-${{ matrix.artifact_suffix }}.zip
+          retention-days: 30
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "All builds passed."
+          else
+            echo "One or more builds failed."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Release — runs only on version tags (e.g. v1.0.0)
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          generate_release_notes: true
+          body_path: .github/RELEASE_NOTES.md

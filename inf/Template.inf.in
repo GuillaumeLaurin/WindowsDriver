@@ -1,0 +1,67 @@
+; ==============================================================================
+;  @PROJECT_NAME@.inf
+;  Version : @PROJECT_VERSION@
+; ==============================================================================
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Unknown
+ClassGuid   = {4d36e97e-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+DriverVer   = 01/01/2024,@PROJECT_VERSION@
+CatalogFile = @PROJECT_NAME@.cat
+PnpLockDown = 1
+
+; ------------------------------------------------------------------------------
+[DestinationDirs]
+DefaultDestDir    = 12          ; %windir%\System32\drivers
+@PROJECT_NAME@_Files = 12
+
+; ------------------------------------------------------------------------------
+[Manufacturer]
+%ManufacturerName% = Standard, NTamd64
+
+[Standard.NTamd64]
+%DeviceName% = @PROJECT_NAME@_Device, Root\@PROJECT_NAME@
+
+; ------------------------------------------------------------------------------
+[@PROJECT_NAME@_Device.NT]
+CopyFiles = @PROJECT_NAME@_Files
+
+[@PROJECT_NAME@_Files]
+@PROJECT_NAME@.sys,,, 0x00000040   ; COPYFLG_OVERWRITE_OLDER_ONLY
+
+; ------------------------------------------------------------------------------
+[@PROJECT_NAME@_Device.NT.Services]
+AddService = @PROJECT_NAME@, 0x00000002, @PROJECT_NAME@_Service
+
+[@PROJECT_NAME@_Service]
+DisplayName    = %ServiceName%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\@PROJECT_NAME@.sys
+LoadOrderGroup = Extended Base
+
+; ------------------------------------------------------------------------------
+;  Sections Debug
+; ------------------------------------------------------------------------------
+[@PROJECT_NAME@_Device.NT.Wdf]
+KmdfService = @PROJECT_NAME@, @PROJECT_NAME@_wdfsect
+
+[@PROJECT_NAME@_wdfsect]
+KmdfLibraryVersion = @KMDF_VERSION@
+
+; ------------------------------------------------------------------------------
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+@PROJECT_NAME@.sys = 1,,
+
+; ------------------------------------------------------------------------------
+[Strings]
+ManufacturerName = "MonEntreprise"
+DiskName         = "@PROJECT_NAME@ Installation Disk"
+DeviceName       = "@PROJECT_NAME@ Device"
+ServiceName      = "@PROJECT_NAME@ Service"
