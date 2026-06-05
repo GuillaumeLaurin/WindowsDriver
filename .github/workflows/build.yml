@@ -1,0 +1,140 @@
+name: Build Driver
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.preset }} — WDK ${{ matrix.wdk }}
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [ debug, release ]
+        wdk:
+          - "10.0.22621.0"    # Windows 11 22H2
+        include:
+          - preset: debug
+            artifact_suffix: dbg
+          - preset: release
+            artifact_suffix: rel
+
+    steps:
+      # --------------------------------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --------------------------------------------------------------------------
+      # 2. Cache WDK (installation takes ~5 min, cache it)
+      # --------------------------------------------------------------------------
+      - name: Cache WDK installer
+        id: cache-wdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\wdksetup.exe
+          key: wdk-installer-${{ matrix.wdk }}-v1
+
+      # --------------------------------------------------------------------------
+      # 3. Install WDK if not cached
+      # --------------------------------------------------------------------------
+      - name: Download WDK installer ${{ matrix.wdk }}
+        if: steps.cache-wdk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $wdkUrl   = "https://go.microsoft.com/fwlink/?linkid=2196230"
+          $installer = "$env:RUNNER_TEMP\wdksetup.exe"
+          Write-Host "Downloading WDK..."
+          Invoke-WebRequest -Uri $wdkUrl -OutFile $installer -UseBasicParsing
+          Write-Host "Download complete."
+        
+      # --------------------------------------------------------------------------
+      # 4. Install WDK if not cached
+      # --------------------------------------------------------------------------   
+      - name: Install WDK ${{ matrix.wdk }}
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\wdksetup.exe"
+          Write-Host "Installing WDK..."
+          Start-Process -FilePath $installer `
+            -ArgumentList "/quiet", "/norestart" `
+            -Wait -NoNewWindow
+          Write-Host "WDK installed."
+
+      # --------------------------------------------------------------------------
+      # 5. Set up MSVC environment
+      # --------------------------------------------------------------------------
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # --------------------------------------------------------------------------
+      # 6. Configure CMake
+      # --------------------------------------------------------------------------
+      - name: Configure (${{ matrix.preset }})
+        run: |
+          cmake --preset ${{ matrix.preset }} `
+            -DWDK_VERSION="${{ matrix.wdk }}"
+
+      # --------------------------------------------------------------------------
+      # 7. Build
+      # --------------------------------------------------------------------------
+      - name: Build (${{ matrix.preset }})
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      # --------------------------------------------------------------------------
+      # 8. Verify outputs
+      # --------------------------------------------------------------------------
+      - name: Verify outputs
+        shell: pwsh
+        run: |
+          $sys = Get-ChildItem -Recurse -Filter "*.sys" build/
+          if ($sys.Count -eq 0) {
+            Write-Error "No .sys file found — build failed"
+            exit 1
+          }
+          $sys | ForEach-Object { Write-Host "  OK $($_.FullName)" }
+
+      # --------------------------------------------------------------------------
+      # 9. Upload artifacts
+      # --------------------------------------------------------------------------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-${{ matrix.artifact_suffix }}-wdk${{ matrix.wdk }}
+          path: |
+            build/${{ matrix.preset }}/**/*.sys
+            build/${{ matrix.preset }}/**/*.pdb
+            build/${{ matrix.preset }}/**/*.inf
+          retention-days: 30
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  # Summary job (overall status badge)
+  # ----------------------------------------------------------------------------
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "All builds passed."
+          else
+            echo "One or more builds failed."
+            exit 1
+          fi

@@ -1,0 +1,86 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME":    "Windows",
+        "CMAKE_SYSTEM_VERSION": "10.0",
+        "USE_KMDF":             "ON",
+        "USE_WDM":              "OFF",
+        "DRIVER_SIGN":          "OFF"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug x64",
+      "description": "Build de développement avec symboles complets",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release x64",
+      "description": "Build optimisé pour la distribution",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "release-signed",
+      "displayName": "Release x64 (signé)",
+      "description": "Build Release avec signature du driver",
+      "inherits": "release",
+      "cacheVariables": {
+        "DRIVER_SIGN": "ON"
+      }
+    },
+    {
+      "name": "wdm-debug",
+      "displayName": "WDM Debug x64",
+      "description": "Build WDM bas niveau (sans KMDF)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_KMDF":         "OFF",
+        "USE_WDM":          "ON"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    {
+      "name": "debug",
+      "displayName": "Build Debug",
+      "configurePreset": "debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "displayName": "Build Release",
+      "configurePreset": "release",
+      "configuration": "Release"
+    },
+    {
+      "name": "release-signed",
+      "displayName": "Build Release (signé)",
+      "configurePreset": "release-signed",
+      "configuration": "Release"
+    },
+    {
+      "name": "wdm-debug",
+      "displayName": "Build WDM Debug",
+      "configurePreset": "wdm-debug",
+      "configuration": "Debug"
+    }
+  ]
+}
